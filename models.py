@@ -223,4 +223,23 @@ class Dense121(nn.Module):
         return embed_fea, pred              
         
 
+class Empty(nn.Module):
+    def __init__(self):
+        super(Empty, self).__init__()
+    def forward(self, x):
+        return x
             
+class ResSimCLR(nn.Module):
+    def __init__(self, class_num):
+        super(ResSimCLR, self).__init__()
+        model_ft = models.resnet18(pretrained=False)
+        fc_feature = model_ft.fc.in_features
+        model_ft.fc = Empty()     
+        self.model = model_ft
+        self.MLP_1 = nn.Linear(fc_feature, fc_feature, bias=False)
+        self.MLP_2 = nn.Linear(fc_feature, class_num, bias=False)
+
+    def forward(self, x):
+        represent = self.model(x)
+        pred = self.MLP_2(F.relu(self.MLP_1(represent)))
+        return represent, pred

@@ -25,7 +25,7 @@ from torchvision import datasets, models, transforms
 import torch.nn.functional as F
 
 from ImageDataLoader import SimpleImageLoader
-from models import Res18, Res50, Dense121, Res18_basic
+from models import Res18, Res50, Dense121, Res18_basic, ResSimCLR
 
 import nsml
 from nsml import DATASET_PATH, IS_ON_NSML
@@ -73,6 +73,44 @@ def linear_rampup(current, rampup_length):
         current = np.clip(current / rampup_length, 0.0, 1.0)
         return float(current)
         
+class NT_Xent(nn.Module):
+    def __init__(self, batch_size, temperature):
+        super(NT_Xent, self).__init__()
+        self.batch_size = batch_size
+        self.temperature = temperature
+        self.similarity = torch.nn.CosineSimilarity(dim=-1)
+        self.criterion = torch.nn.CrossEntropyLoss(reduction="sum")
+        self.mask_samples_from_same_repr = self._get_correlated_mask().type(torch.bool)
+
+    def _get_correlated_mask(self):
+        diag = np.eye(2 * self.batch_size)
+        l1 = np.eye((2 * self.batch_size), 2 * self.batch_size, k=-self.batch_size)
+        l2 = np.eye((2 * self.batch_size), 2 * self.batch_size, k=self.batch_size)
+        mask = torch.from_numpy((diag + l1 + l2))
+        mask = (1 - mask).type(torch.bool)
+        return mask.to(torch.device('cuda'))
+
+    def forward(self, pred_u1, pred_u2):
+        # add loss function here
+        pred_u1 = F.normalize(pred_u1, dim=1)
+        pred_u2 = F.normalize(pred_u2, dim=1)
+        pred_concat = torch.cat((pred_u1, pred_u2), dim=0)
+        similarity_matrix = self.similarity(pred_concat.unsqueeze(1), pred_concat.unsqueeze(0))
+
+        l_pos = torch.diag(similarity_matrix, self.batch_size)
+        r_pos = torch.diag(similarity_matrix, -self.batch_size)
+        positives = torch.cat([l_pos, r_pos]).view(2 * self.batch_size, 1)
+
+        negatives = similarity_matrix[self.mask_samples_from_same_repr].view(2 * self.batch_size, -1)
+
+        logits = torch.cat((positives, negatives), dim=1)
+        logits /= self.temperature
+
+        labels = torch.zeros(2 * self.batch_size).to(torch.device('cuda')).long()
+        loss = self.criterion(logits, labels)
+
+        return loss / (2*self.batch_size)
+
 class SemiLoss(object):
     def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch, final_epoch):
         probs_u = torch.softmax(outputs_u, dim=1)
@@ -198,9 +236,9 @@ parser.add_argument('--epochs', type=int, default=200, metavar='N', help='number
 parser.add_argument('--steps_per_epoch', type=int, default=30, metavar='N', help='number of steps to train per epoch (-1: num_data//batchsize)')
 
 # basic settings
-parser.add_argument('--name',default='Res18_weight_high', type=str, help='output model name')
-parser.add_argument('--gpu_ids',default='0', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
-parser.add_argument('--batchsize', default=200, type=int, help='batchsize')
+parser.add_argument('--name',default='Res18_simclr', type=str, help='output model name')
+parser.add_argument('--gpu_ids',default='0,1', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
+parser.add_argument('--batchsize', default=400, type=int, help='batchsize')
 parser.add_argument('--seed', type=int, default=123, help='random seed')
 
 # basic hyper-parameters
@@ -215,8 +253,8 @@ parser.add_argument('--log_interval', type=int, default=10, metavar='N', help='l
 parser.add_argument('--save_epoch', type=int, default=50, help='saving epoch interval')
 
 # hyper-parameters for mix-match
-parser.add_argument('--alpha', default=0.75, type=float)
-parser.add_argument('--lambda-u', default=250, type=float)
+# parser.add_argument('--alpha', default=0.75, type=float)
+# parser.add_argument('--lambda-u', default=50, type=float)
 parser.add_argument('--T', default=0.25, type=float)
 
 ### DO NOT MODIFY THIS BLOCK ###
@@ -252,14 +290,15 @@ def main():
 
 
     # Set model
-    model = Res18_basic(NUM_CLASSES)
+    # model = Res18_basic(NUM_CLASSES)
+    model = ResSimCLR(NUM_CLASSES)
     model.eval()
 
     # set EMA model
-    ema_model = Res18_basic(NUM_CLASSES)
-    for param in ema_model.parameters():
-        param.detach_()
-    ema_model.eval()
+    # ema_model = Res18_basic(NUM_CLASSES)
+    # for param in ema_model.parameters():
+    #     param.detach_()
+    # ema_model.eval()
 
     parameters = filter(lambda p: p.requires_grad, model.parameters())
     n_parameters = sum([p.data.nelement() for p in model.parameters()])
@@ -267,9 +306,10 @@ def main():
 
     if use_gpu:
         model.cuda()
-        ema_model.cuda()
+        # ema_model.cuda()
 
-    model_for_test = ema_model # change this to model if ema_model is not used.
+    # model_for_test = ema_model # change this to model if ema_model is not used.
+    model_for_test = model
 
     ### DO NOT MODIFY THIS BLOCK ###
     if IS_ON_NSML:
@@ -282,9 +322,9 @@ def main():
         # set multi-gpu
         if len(opts.gpu_ids.split(',')) > 1:
             model = nn.DataParallel(model)
-            ema_model = nn.DataParallel(ema_model)
+            # ema_model = nn.DataParallel(ema_model)
         model.train()
-        ema_model.train()
+        # ema_model.train()
 
         # Set dataloader
         train_ids, val_ids, unl_ids = split_ids(os.path.join(DATASET_PATH, 'train/train_label'), 0.2)
@@ -305,8 +345,7 @@ def main():
             SimpleImageLoader(DATASET_PATH, 'unlabel', unl_ids,
                               transform=transforms.Compose([
                                   transforms.Resize(opts.imResize),
-                                  transforms.RandomResizedCrop(opts.imsize),
-                                  transforms.RandomApply([color_jitter], p=0.8),
+                                  transforms.CenterCrop(opts.imsize),
                                   transforms.ToTensor(),
                                   transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),])),
                                 batch_size=opts.batchsize, shuffle=True, num_workers=0, pin_memory=True, drop_last=True)
@@ -327,10 +366,11 @@ def main():
 
         # Set optimizer
         optimizer = optim.Adam(model.parameters(), lr=opts.lr, weight_decay=5e-4)
-        ema_optimizer= WeightEMA(model, ema_model, lr=opts.lr, alpha=opts.ema_decay)
+        # ema_optimizer= WeightEMA(model, ema_model, lr=opts.lr, alpha=opts.ema_decay)
 
         # INSTANTIATE LOSS CLASS
-        train_criterion = SemiLoss()
+        # train_criterion = SemiLoss()
+        train_criterion = NT_Xent(opts.batchsize, opts.T)
 
         # INSTANTIATE STEP LEARNING SCHEDULER CLASS
         # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,  milestones=[50, 150], gamma=0.1)
@@ -339,13 +379,15 @@ def main():
         best_acc = -1
         for epoch in range(opts.start_epoch, opts.epochs + 1):
             # print('start training')
-            loss, loss_x, loss_u, avg_top1, avg_top5 = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, ema_optimizer, epoch, use_gpu)
-            print('epoch {:03d}/{:03d} finished, loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, loss, loss_x, loss_u, avg_top1, avg_top5))
+            # loss, loss_x, loss_u, avg_top1, avg_top5 = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, ema_optimizer, epoch, use_gpu)
+            loss = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu)
+            # print('epoch {:03d}/{:03d} finished, loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, loss, loss_x, loss_u, avg_top1, avg_top5))
             # scheduler.step()
 
             # print('start validation')
-            acc_top1, acc_top5 = validation(opts, validation_loader, ema_model, epoch, use_gpu)
-            print(acc_top1)
+            # acc_top1, acc_top5 = validation(opts, validation_loader, ema_model, epoch, use_gpu)
+            acc_top1, acc_top5 = validation(opts, validation_loader, model, epoch, use_gpu)
+            print('epoch {:03d}/{:03d} finished, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, acc_top1, acc_top5))
             is_best = acc_top1 > best_acc
             best_acc = max(acc_top1, best_acc)
             if is_best:
@@ -353,133 +395,118 @@ def main():
                 if IS_ON_NSML:
                     nsml.save(opts.name + '_best')
                 else:
-                    torch.save(ema_model.state_dict(), os.path.join('runs', opts.name + '_best'))
+                    # torch.save(ema_model.state_dict(), os.path.join('runs', opts.name + '_best'))
+                    torch.save(model.state_dict(), os.path.join('runs', opts.name + '_best'))
             if (epoch + 1) % opts.save_epoch == 0:
                 if IS_ON_NSML:
                     nsml.save(opts.name + '_e{}'.format(epoch))
                 else:
-                    torch.save(ema_model.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(epoch)))
+                    # torch.save(ema_model.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(epoch)))
+                    torch.save(model.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(epoch)))
 
                 
-def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, ema_optimizer, epoch, use_gpu):
+# def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, ema_optimizer, epoch, use_gpu):
+def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch, use_gpu):
     global global_step
 
     losses = AverageMeter()
-    losses_x = AverageMeter()
-    losses_un = AverageMeter()
+    # losses_x = AverageMeter()
+    # losses_un = AverageMeter()
     
     losses_curr = AverageMeter()
-    losses_x_curr = AverageMeter()
-    losses_un_curr = AverageMeter()
+    # losses_x_curr = AverageMeter()
+    # losses_un_curr = AverageMeter()
 
     weight_scale = AverageMeter()
-    acc_top1 = AverageMeter()
-    acc_top5 = AverageMeter()
+    # acc_top1 = AverageMeter()
+    # acc_top5 = AverageMeter()
     
     model.train()
-    
+
     # nCnt =0 
     out = False
     local_step = 0
     while not out:
-        labeled_train_iter = iter(train_loader)
+        # labeled_train_iter = iter(train_loader)
         unlabeled_train_iter = iter(unlabel_loader)
-        for batch_idx in range(len(train_loader)):
-            try:
-                data = labeled_train_iter.next()
-                inputs_x, targets_x = data
-            except:
-                labeled_train_iter = iter(train_loader)       
-                data = labeled_train_iter.next()
-                inputs_x, targets_x = data
-            try:
-                data = unlabeled_train_iter.next()
-                inputs_u1, inputs_u2 = data
-            except:
-                unlabeled_train_iter = iter(unlabel_loader)       
-                data = unlabeled_train_iter.next()
-                inputs_u1, inputs_u2 = data         
-        
-            batch_size = inputs_x.size(0)
-            # Transform label to one-hot
-            classno = NUM_CLASSES 
-            targets_org = targets_x
-            targets_x = torch.zeros(batch_size, classno).scatter_(1, targets_x.view(-1,1), 1)        
+        for batch_idx in range(len(unlabel_loader)):
+            data = unlabeled_train_iter.next()
+            inputs_u1, inputs_u2 = data           
             
             if use_gpu :
-                inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda()
                 inputs_u1, inputs_u2 = inputs_u1.cuda(), inputs_u2.cuda()    
             
-            with torch.no_grad():
+            # with torch.no_grad():
                 # compute guessed labels of unlabel samples
-                embed_u1, pred_u1 = model(inputs_u1)
-                embed_u2, pred_u2 = model(inputs_u2)
-                pred_u_all = (torch.softmax(pred_u1, dim=1) + torch.softmax(pred_u2, dim=1)) / 2
-                pt = pred_u_all**(1/opts.T)
-                targets_u = pt / pt.sum(dim=1, keepdim=True)
-                targets_u = targets_u.detach()
+            rep_u1, pred_u1 = model(inputs_u1)
+            rep_u2, pred_u2 = model(inputs_u2)
+                # pred_u_all = (torch.softmax(pred_u1, dim=1) + torch.softmax(pred_u2, dim=1)) / 2
+                # pt = pred_u_all**(1/opts.T)
+                # targets_u = pt / pt.sum(dim=1, keepdim=True)
+                # targets_u = targets_u.detach()
                 
-            # mixup
-            all_inputs = torch.cat([inputs_x, inputs_u1, inputs_u2], dim=0)
-            all_targets = torch.cat([targets_x, targets_u, targets_u], dim=0)            
+            # # mixup
+            # all_inputs = torch.cat([inputs_x, inputs_u1, inputs_u2], dim=0)
+            # all_targets = torch.cat([targets_x, targets_u, targets_u], dim=0)            
             
-            lamda = np.random.beta(opts.alpha, opts.alpha)        
-            lamda= max(lamda, 1-lamda)    
-            newidx = torch.randperm(all_inputs.size(0))
-            input_a, input_b = all_inputs, all_inputs[newidx]
-            target_a, target_b = all_targets, all_targets[newidx]        
+            # lamda = np.random.beta(opts.alpha, opts.alpha)        
+            # lamda= max(lamda, 1-lamda)    
+            # newidx = torch.randperm(all_inputs.size(0))
+            # input_a, input_b = all_inputs, all_inputs[newidx]
+            # target_a, target_b = all_targets, all_targets[newidx]        
             
-            mixed_input = lamda * input_a + (1 - lamda) * input_b
-            mixed_target = lamda * target_a + (1 - lamda) * target_b
+            # mixed_input = lamda * input_a + (1 - lamda) * input_b
+            # mixed_target = lamda * target_a + (1 - lamda) * target_b
             
-            # interleave labeled and unlabed samples between batches to get correct batchnorm calculation 
-            mixed_input = list(torch.split(mixed_input, batch_size))
-            mixed_input = interleave(mixed_input, batch_size)
+            # # interleave labeled and unlabed samples between batches to get correct batchnorm calculation 
+            # mixed_input = list(torch.split(mixed_input, batch_size))
+            # mixed_input = interleave(mixed_input, batch_size)
 
             optimizer.zero_grad()
             
-            fea, logits_temp = model(mixed_input[0])
-            logits = [logits_temp]
-            for newinput in mixed_input[1:]:
-                fea, logits_temp = model(newinput)
-                logits.append(logits_temp)        
+            # fea, logits_temp = model(mixed_input[0])
+            # logits = [logits_temp]
+            # for newinput in mixed_input[1:]:
+            #     fea, logits_temp = model(newinput)
+            #     logits.append(logits_temp)        
                 
-            # put interleaved samples back
-            logits = interleave(logits, batch_size)
-            logits_x = logits[0]
-            logits_u = torch.cat(logits[1:], dim=0)            
+            # # put interleaved samples back
+            # logits = interleave(logits, batch_size)
+            # logits_x = logits[0]
+            # logits_u = torch.cat(logits[1:], dim=0)            
             
-            loss_x, loss_un, weigts_mixing = criterion(logits_x, mixed_target[:batch_size], logits_u, mixed_target[batch_size:], epoch+batch_idx/len(train_loader), opts.epochs)
-            loss = loss_x + weigts_mixing * loss_un
+            loss = criterion(pred_u1,pred_u2)
+            # loss_x, loss_un, weigts_mixing = criterion(logits_x, mixed_target[:batch_size], logits_u, mixed_target[batch_size:], epoch+batch_idx/len(train_loader), opts.epochs)
+            # loss = loss_x + weigts_mixing * loss_un
 
-            losses.update(loss.item(), inputs_x.size(0))
-            losses_x.update(loss_x.item(), inputs_x.size(0))
-            losses_un.update(loss_un.item(), inputs_x.size(0))
-            weight_scale.update(weigts_mixing, inputs_x.size(0))
+            losses.update(loss.item(), inputs_u1.size(0))
+            # losses_x.update(loss_x.item(), inputs_x.size(0))
+            # losses_un.update(loss_un.item(), inputs_x.size(0))
+            # weight_scale.update(weigts_mixing, inputs_x.size(0))
 
-            losses_curr.update(loss.item(), inputs_x.size(0))
-            losses_x_curr.update(loss_x.item(), inputs_x.size(0))
-            losses_un_curr.update(loss_un.item(), inputs_x.size(0))
+            losses_curr.update(loss.item(), inputs_u1.size(0))
+            # losses_x_curr.update(loss_x.item(), inputs_x.size(0))
+            # losses_un_curr.update(loss_un.item(), inputs_x.size(0))
                     
             # compute gradient and do SGD step
             loss.backward()
             optimizer.step()
-            ema_optimizer.step()
+            # ema_optimizer.step()
             
-            with torch.no_grad():
-                # compute guessed labels of unlabel samples
-                embed_x, pred_x1 = model(inputs_x)
+            # with torch.no_grad():
+            #     # compute guessed labels of unlabel samples
+            #     embed_x, pred_x1 = model(inputs_x)
 
             if IS_ON_NSML and global_step % opts.log_interval == 0:
-                nsml.report(step=global_step, loss=losses_curr.avg, loss_x=losses_x_curr.avg, loss_un=losses_un_curr.avg)
+                nsml.report(step=global_step, loss=losses_curr.avg)
                 losses_curr.reset()
-                losses_x_curr.reset()
-                losses_un_curr.reset()
+                # losses_x_curr.reset()
+                # losses_un_curr.reset()
 
-            acc_top1b = top_n_accuracy_score(targets_org.data.cpu().numpy(), pred_x1.data.cpu().numpy(), n=1)*100
-            acc_top5b = top_n_accuracy_score(targets_org.data.cpu().numpy(), pred_x1.data.cpu().numpy(), n=5)*100    
-            acc_top1.update(torch.as_tensor(acc_top1b), inputs_x.size(0))        
-            acc_top5.update(torch.as_tensor(acc_top5b), inputs_x.size(0))   
+            # acc_top1b = top_n_accuracy_score(targets_org.data.cpu().numpy(), pred_x1.data.cpu().numpy(), n=1)*100
+            # acc_top5b = top_n_accuracy_score(targets_org.data.cpu().numpy(), pred_x1.data.cpu().numpy(), n=5)*100    
+            # acc_top1.update(torch.as_tensor(acc_top1b), inputs_x.size(0))        
+            # acc_top5.update(torch.as_tensor(acc_top5b), inputs_x.size(0))   
 
             local_step += 1
             global_step += 1
@@ -488,7 +515,8 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, ema_o
                 out = True
                 break
         
-    return losses.avg, losses_x.avg, losses_un.avg, acc_top1.avg, acc_top5.avg
+    # return losses.avg, losses_x.avg, losses_un.avg, acc_top1.avg, acc_top5.avg
+    return losses.avg
 
 
 def validation(opts, validation_loader, model, epoch, use_gpu):
@@ -502,7 +530,7 @@ def validation(opts, validation_loader, model, epoch, use_gpu):
             if use_gpu :
                 inputs = inputs.cuda()
             nCnt +=1
-            embed_fea, preds = model(inputs)
+            represent, preds = model(inputs)
 
             acc_top1 = top_n_accuracy_score(labels.numpy(), preds.data.cpu().numpy(), n=1)*100
             acc_top5 = top_n_accuracy_score(labels.numpy(), preds.data.cpu().numpy(), n=5)*100
