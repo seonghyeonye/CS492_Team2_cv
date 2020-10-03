@@ -237,8 +237,8 @@ parser.add_argument('--steps_per_epoch', type=int, default=30, metavar='N', help
 
 # basic settings
 parser.add_argument('--name',default='Res18_simclr', type=str, help='output model name')
-parser.add_argument('--gpu_ids',default='0,1', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
-parser.add_argument('--batchsize', default=400, type=int, help='batchsize')
+parser.add_argument('--gpu_ids',default='0', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
+parser.add_argument('--batchsize', default=200, type=int, help='batchsize')
 parser.add_argument('--seed', type=int, default=123, help='random seed')
 
 # basic hyper-parameters
@@ -255,7 +255,7 @@ parser.add_argument('--save_epoch', type=int, default=50, help='saving epoch int
 # hyper-parameters for mix-match
 # parser.add_argument('--alpha', default=0.75, type=float)
 # parser.add_argument('--lambda-u', default=50, type=float)
-parser.add_argument('--T', default=0.25, type=float)
+parser.add_argument('--T', default=0.2, type=float)
 
 ### DO NOT MODIFY THIS BLOCK ###
 # arguments for nsml 
@@ -334,8 +334,7 @@ def main():
             SimpleImageLoader(DATASET_PATH, 'train', train_ids,
                               transform=transforms.Compose([
                                   transforms.Resize(opts.imResize),
-                                  transforms.RandomResizedCrop(opts.imsize),
-                                  transforms.RandomApply([color_jitter], p=0.8),
+                                  transforms.CenterCrop(opts.imsize),
                                   transforms.ToTensor(),
                                   transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),])),
                                 batch_size=opts.batchsize, shuffle=True, num_workers=0, pin_memory=True, drop_last=True)
@@ -345,7 +344,8 @@ def main():
             SimpleImageLoader(DATASET_PATH, 'unlabel', unl_ids,
                               transform=transforms.Compose([
                                   transforms.Resize(opts.imResize),
-                                  transforms.CenterCrop(opts.imsize),
+                                  transforms.RandomResizedCrop(opts.imsize),
+                                  transforms.RandomApply([color_jitter], p=0.8),
                                   transforms.ToTensor(),
                                   transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),])),
                                 batch_size=opts.batchsize, shuffle=True, num_workers=0, pin_memory=True, drop_last=True)
@@ -373,6 +373,8 @@ def main():
         train_criterion = NT_Xent(opts.batchsize, opts.T)
 
         # INSTANTIATE STEP LEARNING SCHEDULER CLASS
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=len(train_loader), eta_min=0,
+                                        last_epoch=-1)
         # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,  milestones=[50, 150], gamma=0.1)
 
         # Train and Validation 
@@ -381,12 +383,14 @@ def main():
             # print('start training')
             # loss, loss_x, loss_u, avg_top1, avg_top5 = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, ema_optimizer, epoch, use_gpu)
             loss = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu)
-            # print('epoch {:03d}/{:03d} finished, loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, loss, loss_x, loss_u, avg_top1, avg_top5))
+            # print('epoch {:03d}/{:03d} finished, loss: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, loss, avg_top1, avg_top5))
+            if epoch >= 10:
+                scheduler.step()
             # scheduler.step()
 
             # print('start validation')
             # acc_top1, acc_top5 = validation(opts, validation_loader, ema_model, epoch, use_gpu)
-            acc_top1, acc_top5 = validation(opts, validation_loader, model, epoch, use_gpu)
+            acc_top1, acc_top5 = validation(opts, validation_loader, model, train_criterion, epoch, use_gpu)
             print('epoch {:03d}/{:03d} finished, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, acc_top1, acc_top5))
             is_best = acc_top1 > best_acc
             best_acc = max(acc_top1, best_acc)
@@ -519,7 +523,7 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
     return losses.avg
 
 
-def validation(opts, validation_loader, model, epoch, use_gpu):
+def validation(opts, validation_loader, model, criterion, epoch, use_gpu):
     model.eval()
     avg_top1= 0.0
     avg_top5 = 0.0
