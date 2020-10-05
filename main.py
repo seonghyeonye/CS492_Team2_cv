@@ -197,13 +197,13 @@ def bind_nsml(model):
 ######################################################################
 parser = argparse.ArgumentParser(description='Sample Product200K Training')
 parser.add_argument('--start_epoch', type=int, default=1, metavar='N', help='number of start epoch (default: 1)')
-parser.add_argument('--epochs', type=int, default=250, metavar='N', help='number of epochs to train (default: 200)')
+parser.add_argument('--epochs', type=int, default=300, metavar='N', help='number of epochs to train (default: 200)')
 parser.add_argument('--steps_per_epoch', type=int, default=30, metavar='N', help='number of steps to train per epoch (-1: num_data//batchsize)')
 
 # basic settings
 parser.add_argument('--name',default='Res18_sim', type=str, help='output model name')
-parser.add_argument('--gpu_ids',default='0', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
-parser.add_argument('--batchsize', default=300, type=int, help='batchsize')
+parser.add_argument('--gpu_ids',default='0,1', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
+parser.add_argument('--batchsize', default=200, type=int, help='batchsize')
 parser.add_argument('--seed', type=int, default=123, help='random seed')
 
 # basic hyper-parameters
@@ -220,7 +220,7 @@ parser.add_argument('--save_epoch', type=int, default=50, help='saving epoch int
 # hyper-parameters for mix-match
 parser.add_argument('--alpha', default=0.75, type=float)
 parser.add_argument('--lambda-u', default=50, type=float)
-parser.add_argument('--T', default=0.1, type=float)
+parser.add_argument('--T', default=0.2, type=float)
 
 #hyper-parameters for sim-reg
 parser.add_argument('--lambda-s', default=1, type=float)
@@ -248,7 +248,7 @@ def main():
 
     os.environ['CUDA_VISIBLE_DEVICES'] = opts.gpu_ids
     use_gpu = torch.cuda.is_available()
-    use_gpu = 0
+    # use_gpu = 0
     if use_gpu:
         opts.cuda = 1
         print("Currently using GPU {}".format(opts.gpu_ids))
@@ -342,14 +342,16 @@ def main():
 
         # INSTANTIATE STEP LEARNING SCHEDULER CLASS
         # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,  milestones=[50, 150], gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=len(train_loader))
 
         # Train and Validation 
         best_acc = -1
         for epoch in range(opts.start_epoch, opts.epochs + 1):
             # print('start training')
             loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5 = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu)
-            print('epoch {:03d}/{:03d} finished, loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, loss_sim: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5))
-            # scheduler.step()
+            # print('epoch {:03d}/{:03d} finished, loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, loss_sim: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5))
+            scheduler.step()
+            print('epoch {:03d}/{:03d} finished, learning rate : {:.6E} loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, loss_sim: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, scheduler.get_lr()[0], opts.epochs, loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5))
 
             # print('start validation')
             # acc_top1, acc_top5 = validation(opts, validation_loader, ema_model, epoch, use_gpu)
