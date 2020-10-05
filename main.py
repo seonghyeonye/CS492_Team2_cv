@@ -248,7 +248,7 @@ def main():
 
     os.environ['CUDA_VISIBLE_DEVICES'] = opts.gpu_ids
     use_gpu = torch.cuda.is_available()
-    # use_gpu = 0
+    use_gpu = 0
     if use_gpu:
         opts.cuda = 1
         print("Currently using GPU {}".format(opts.gpu_ids))
@@ -263,10 +263,10 @@ def main():
     model.eval()
 
     # set EMA model
-    ema_model = Res18_basic(NUM_CLASSES)
-    for param in ema_model.parameters():
-        param.detach_()
-    ema_model.eval()
+    # ema_model = Res18_basic(NUM_CLASSES)
+    # for param in ema_model.parameters():
+    #     param.detach_()
+    # ema_model.eval()
 
     parameters = filter(lambda p: p.requires_grad, model.parameters())
     n_parameters = sum([p.data.nelement() for p in model.parameters()])
@@ -274,9 +274,10 @@ def main():
 
     if use_gpu:
         model.cuda()
-        ema_model.cuda()
+        # ema_model.cuda()
 
-    model_for_test = ema_model # change this to model if ema_model is not used.
+    # model_for_test = ema_model # change this to model if ema_model is not used.
+    model_for_test = model
 
     ### DO NOT MODIFY THIS BLOCK ###
     if IS_ON_NSML:
@@ -289,9 +290,9 @@ def main():
         # set multi-gpu
         if len(opts.gpu_ids.split(',')) > 1:
             model = nn.DataParallel(model)
-            ema_model = nn.DataParallel(ema_model)
+            # ema_model = nn.DataParallel(ema_model)
         model.train()
-        ema_model.train()
+        # ema_model.train()
 
         # Set dataloader
         train_ids, val_ids, unl_ids = split_ids(os.path.join(DATASET_PATH, 'train/train_label'), 0.2)
@@ -334,7 +335,7 @@ def main():
 
         # Set optimizer
         optimizer = optim.Adam(model.parameters(), lr=opts.lr, weight_decay=5e-4)
-        ema_optimizer= WeightEMA(model, ema_model, lr=opts.lr, alpha=opts.ema_decay)
+        # ema_optimizer= WeightEMA(model, ema_model, lr=opts.lr, alpha=opts.ema_decay)
 
         # INSTANTIATE LOSS CLASS
         train_criterion = SemiLoss()
@@ -346,12 +347,13 @@ def main():
         best_acc = -1
         for epoch in range(opts.start_epoch, opts.epochs + 1):
             # print('start training')
-            loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5 = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, ema_optimizer, epoch, use_gpu)
+            loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5 = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu)
             print('epoch {:03d}/{:03d} finished, loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, loss_sim: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5))
             # scheduler.step()
 
             # print('start validation')
-            acc_top1, acc_top5 = validation(opts, validation_loader, ema_model, epoch, use_gpu)
+            # acc_top1, acc_top5 = validation(opts, validation_loader, ema_model, epoch, use_gpu)
+            acc_top1, acc_top5 = validation(opts, validation_loader, model, epoch, use_gpu)
             print(acc_top1, acc_top5)
             is_best = acc_top1 > best_acc
             best_acc = max(acc_top1, best_acc)
@@ -360,15 +362,15 @@ def main():
                 if IS_ON_NSML:
                     nsml.save(opts.name + '_best')
                 else:
-                    torch.save(ema_model.state_dict(), os.path.join('runs', opts.name + '_best'))
+                    torch.save(model.state_dict(), os.path.join('runs', opts.name + '_best'))
             if (epoch + 1) % opts.save_epoch == 0:
                 if IS_ON_NSML:
                     nsml.save(opts.name + '_e{}'.format(epoch))
                 else:
-                    torch.save(ema_model.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(epoch)))
+                    torch.save(model.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(epoch)))
 
                 
-def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, ema_optimizer, epoch, use_gpu):
+def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch, use_gpu):
     global global_step
 
     losses = AverageMeter()
@@ -483,7 +485,7 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, ema_o
             # compute gradient and do SGD step
             loss.backward()
             optimizer.step()
-            ema_optimizer.step()
+            # ema_optimizer.step()
             
             with torch.no_grad():
                 # compute guessed labels of unlabel samples
