@@ -202,13 +202,13 @@ parser.add_argument('--steps_per_epoch', type=int, default=30, metavar='N', help
 
 # basic settings
 parser.add_argument('--name',default='Res18_sim', type=str, help='output model name')
-parser.add_argument('--gpu_ids',default='0,1', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
+parser.add_argument('--gpu_ids',default='1', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
 parser.add_argument('--batchsize', default=200, type=int, help='batchsize')
 parser.add_argument('--seed', type=int, default=123, help='random seed')
 
 # basic hyper-parameters
 parser.add_argument('--momentum', type=float, default=0.9, metavar='LR', help=' ')
-parser.add_argument('--lr', type=float, default=1e-3, metavar='LR', help='learning rate')
+parser.add_argument('--lr', type=float, default=1e-4, metavar='LR', help='learning rate')
 parser.add_argument('--imResize', default=256, type=int, help='')
 parser.add_argument('--imsize', default=224, type=int, help='')
 parser.add_argument('--ema_decay', type=float, default=0.999, help='ema decay rate (0: no ema model)')
@@ -341,8 +341,8 @@ def main():
         train_criterion = SemiLoss()
 
         # INSTANTIATE STEP LEARNING SCHEDULER CLASS
-        # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,  milestones=[50, 150], gamma=0.1)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=len(train_loader))
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,  milestones=[100, 200], gamma=0.5)
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=len(train_loader))
 
         # Train and Validation 
         best_acc = -1
@@ -351,7 +351,8 @@ def main():
             loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5 = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu)
             # print('epoch {:03d}/{:03d} finished, loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, loss_sim: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5))
             scheduler.step()
-            print('epoch {:03d}/{:03d} finished, learning rate : {:.6E} loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, loss_sim: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, scheduler.get_lr()[0], opts.epochs, loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5))
+            print('epoch {:03d}/{:03d} finished, learning rate : {:.6E} loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, loss_sim: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, scheduler.get_last_lr()[0], loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5))
+            # print('epoch {:03d}/{:03d} finished, loss: {:.3f}, loss_x: {:.3f}, loss_un: {:.3f}, loss_sim: {:.3f}, avg_top1: {:.3f}%, avg_top5: {:.3f}%'.format(epoch, opts.epochs, loss, loss_x, loss_u, loss_sim, avg_top1, avg_top5))
 
             # print('start validation')
             # acc_top1, acc_top5 = validation(opts, validation_loader, ema_model, epoch, use_gpu)
