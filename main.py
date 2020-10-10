@@ -28,7 +28,6 @@ from ImageDataLoader import SimpleImageLoader
 from models import Res18, Res50, Dense121, Res18_basic
 
 from Simloss import SimLoss
-from Simloss import NT_Xent
 
 import nsml
 from nsml import DATASET_PATH, IS_ON_NSML
@@ -197,18 +196,18 @@ def bind_nsml(model):
 ######################################################################
 parser = argparse.ArgumentParser(description='Sample Product200K Training')
 parser.add_argument('--start_epoch', type=int, default=1, metavar='N', help='number of start epoch (default: 1)')
-parser.add_argument('--epochs', type=int, default=250, metavar='N', help='number of epochs to train (default: 200)')
+parser.add_argument('--epochs', type=int, default=400, metavar='N', help='number of epochs to train (default: 200)')
 parser.add_argument('--steps_per_epoch', type=int, default=30, metavar='N', help='number of steps to train per epoch (-1: num_data//batchsize)')
 
 # basic settings
-parser.add_argument('--name',default='Res18_sim', type=str, help='output model name')
-parser.add_argument('--gpu_ids',default='0', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
+parser.add_argument('--name',default='SimMixMatch', type=str, help='output model name')
+parser.add_argument('--gpu_ids',default='0,1', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
 parser.add_argument('--batchsize', default=300, type=int, help='batchsize')
 parser.add_argument('--seed', type=int, default=123, help='random seed')
 
 # basic hyper-parameters
 parser.add_argument('--momentum', type=float, default=0.9, metavar='LR', help=' ')
-parser.add_argument('--lr', type=float, default=1e-3, metavar='LR', help='learning rate')
+parser.add_argument('--lr', type=float, default=4e-4, metavar='LR', help='learning rate')
 parser.add_argument('--imResize', default=256, type=int, help='')
 parser.add_argument('--imsize', default=224, type=int, help='')
 parser.add_argument('--ema_decay', type=float, default=0.999, help='ema decay rate (0: no ema model)')
@@ -302,6 +301,7 @@ def main():
                               transform=transforms.Compose([
                                   transforms.Resize(opts.imResize),
                                   transforms.RandomResizedCrop(opts.imsize),
+                                  transforms.RandomHorizontalFlip(),
                                   transforms.RandomApply([color_jitter], p=0.8),
                                   transforms.ToTensor(),
                                   transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),])),
@@ -313,6 +313,7 @@ def main():
                               transform=transforms.Compose([
                                   transforms.Resize(opts.imResize),
                                   transforms.RandomResizedCrop(opts.imsize),
+                                  transforms.RandomHorizontalFlip(),
                                   transforms.RandomApply([color_jitter], p=0.8),
                                   transforms.ToTensor(),
                                   transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),])),
@@ -404,11 +405,11 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, ema_o
                 inputs_x, targets_x = data
             try:
                 data = unlabeled_train_iter.next()
-                inputs_u1, inputs_u2 = data
+                inputs_u1, inputs_u2, inputs_u3 = data
             except:
                 unlabeled_train_iter = iter(unlabel_loader)       
                 data = unlabeled_train_iter.next()
-                inputs_u1, inputs_u2 = data         
+                inputs_u1, inputs_u2, inputs_u3 = data         
         
             batch_size = inputs_x.size(0)
             # Transform label to one-hot
@@ -418,29 +419,32 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, ema_o
             
             if use_gpu :
                 inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda()
-                inputs_u1, inputs_u2 = inputs_u1.cuda(), inputs_u2.cuda()    
+                inputs_u1, inputs_u2, inputs_u3 = inputs_u1.cuda(), inputs_u2.cuda(), inputs_u3.cuda()    
             
             with torch.no_grad():
                 # compute guessed labels of unlabel samples
                 embed_u1, pred_u1 = model(inputs_u1)
                 embed_u2, pred_u2 = model(inputs_u2)
-                pred_u_all = (torch.softmax(pred_u1, dim=1) + torch.softmax(pred_u2, dim=1)) / 2
+                embed_u3, pred_u3 = model(inputs_u3)
+                pred_u_all = (torch.softmax(pred_u1, dim=1) + torch.softmax(pred_u2, dim=1) + torch.softmax(pred_u3, dim=1)) / 3
                 pt = pred_u_all**(1/opts.T)
                 targets_u = pt / pt.sum(dim=1, keepdim=True)
                 targets_u = targets_u.detach()
                 
             # mixup
-            all_inputs = torch.cat([inputs_x, inputs_u1, inputs_u2], dim=0)
-            all_targets = torch.cat([targets_x, targets_u, targets_u], dim=0)            
+            all_inputs = torch.cat([inputs_x, inputs_u1, inputs_u2, inputs_u3], dim=0)
+            all_targets = torch.cat([targets_x, targets_u, targets_u, targets_u], dim=0)            
             
-            lamda = np.random.beta(opts.alpha, opts.alpha)        
-            lamda= max(lamda, 1-lamda)    
-            newidx = torch.randperm(all_inputs.size(0))
-            input_a, input_b = all_inputs, all_inputs[newidx]
-            target_a, target_b = all_targets, all_targets[newidx]        
+            lamda1 = np.random.beta(opts.alpha, opts.alpha)        
+            lamda1= max(lamda1, 1-lamda1)
+            lambda2 = np.random.beta(opts.alpha, opts.alpha)    
+            newidx1 = torch.randperm(all_inputs.size(0))
+            newidx2 = torch.randperm(all_inputs.size(0))
+            input_a, input_b, input_c = all_inputs, all_inputs[newidx1], all_inputs[newidx2]
+            target_a, target_b, target_c = all_targets, all_targets[newidx1], all_targets[newidx2]        
             
-            mixed_input = lamda * input_a + (1 - lamda) * input_b
-            mixed_target = lamda * target_a + (1 - lamda) * target_b
+            mixed_input = lamda1 * input_a + (1 - lamda1) * lambda2 * input_b + (1-lamda1) * (1-lambda2) * input_c
+            mixed_target = lamda1 * target_a + (1 - lamda1) * lambda2 * target_b + (1-lamda1) * (1-lambda2) * target_c
             
             # interleave labeled and unlabed samples between batches to get correct batchnorm calculation 
             mixed_input = list(torch.split(mixed_input, batch_size))
@@ -459,13 +463,10 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, ema_o
             logits_x = logits[0]
             logits_u = torch.cat(logits[1:], dim=0)     
 
-            # sim_crit = SimLoss()
+            sim_criterion = SimLoss()
+            loss_sim = sim_criterion([pred_u1, pred_u2, pred_u3], opts.batchsize, opts.T)
             # loss_sim = sim_crit(model, sim_unlabeld_train_iter, len(unlabel_loader),use_gpu)
 
-            sim_criterion = NT_Xent(opts.batchsize, opts.T)
-            # loss_sim = sim_criterion(norm_embed_u1, norm_embed_u2)
-            # loss_sim = sim_criterion(embed_u1, embed_u2)
-            loss_sim = sim_criterion(pred_u1, pred_u2)
             loss_x, loss_un, weigts_mixing = criterion(logits_x, mixed_target[:batch_size], logits_u, mixed_target[batch_size:], epoch+batch_idx/len(train_loader), opts.epochs)
             loss = loss_x + weigts_mixing * loss_un + opts.lambda_s * loss_sim
 

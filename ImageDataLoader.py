@@ -9,13 +9,14 @@ import torch
 def default_image_loader(path):
     return Image.open(path).convert('RGB')
 
-class TransformTwice:
+class TransformThrice:
     def __init__(self, transform):
         self.transform = transform
     def __call__(self, inp):
         out1 = self.transform(inp)
         out2 = self.transform(inp)
-        return out1, out2    
+        out3 = self.transform(inp)
+        return out1, out2, out3    
     
 class SimpleImageLoader(torch.utils.data.Dataset):
     def __init__(self, rootdir, split, ids=None, transform=None, loader=default_image_loader):
@@ -45,7 +46,7 @@ class SimpleImageLoader(torch.utils.data.Dataset):
                             imclasses.append(int(label))
 
         self.transform = transform
-        self.TransformTwice = TransformTwice(transform)
+        self.TransformThrice = TransformThrice(transform)
         self.loader = loader
         self.split = split
         self.imnames = imnames
@@ -65,8 +66,8 @@ class SimpleImageLoader(torch.utils.data.Dataset):
             label = self.imclasses[index]
             return img, label
         else:        
-            img1, img2 = self.TransformTwice(img)
-            return img1, img2
+            img1, img2, img3 = self.TransformThrice(img)
+            return img1, img2, img3
         
     def __len__(self):
         return len(self.imnames)
